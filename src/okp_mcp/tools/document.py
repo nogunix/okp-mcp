@@ -203,6 +203,13 @@ async def _fetch_document_with_query(
     document happens to share too few terms with the query would match zero
     rows and be reported as "Document not found". Returns the Solr response.
     """
+    # defType=lucene overrides the edismax default from _SOLR_BASE_PARAMS. The
+    # base edismax boost params (qf/pf/mm/ps) still ride along in the merged
+    # request and appear in the SOLR query log, but Solr silently ignores them
+    # under the lucene parser -- they are inert here, not a bug. They are left
+    # in place rather than filtered out because _solr_query is shared with
+    # search_portal, which needs them; stripping them would risk that path for a
+    # purely cosmetic log cleanup.
     return await _solr_query(
         {
             "q": _doc_id_filter(doc_id),
