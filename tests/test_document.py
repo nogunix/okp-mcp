@@ -11,9 +11,13 @@ from prometheus_client import REGISTRY
 
 from okp_mcp import tools
 from okp_mcp.config import ServerConfig
+from okp_mcp.solr import _clean_query
+from okp_mcp.tools.document import _doc_id_filter
 from okp_mcp.tools.document import _DOCUMENTATION_MAX_CHARS
 from okp_mcp.tools.document import _DOCUMENTATION_MAX_SECTIONS
 from okp_mcp.tools.document import _DOCUMENTATION_PER_SECTION
+from okp_mcp.tools.document import _fetch_document_raw
+from okp_mcp.tools.document import _fetch_document_with_query
 from okp_mcp.tools.document import _format_document_content
 from okp_mcp.tools.document import _format_document_passages
 from okp_mcp.tools.document import _format_metadata
@@ -460,3 +464,80 @@ async def test_not_found_counter_not_incremented_when_doc_exists():
         await tools.get_document(mock_ctx, "/solutions/12345")
 
     assert _get_counter("okp_document_not_found") == before
+
+
+# ---------------------------------------------------------------------------
+# Solr request construction
+#
+# These assert the parameters actually sent to Solr. The rest of this module
+# mocks _fetch_document_raw / _solr_query out, so a lookup that never matches
+# anything still passes every other test here.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "doc_id,expected_clause",
+    [
+        # solutions/articles/documentation: id carries /index.html, no view_uri,
+        # and search_portal renders the URL with the suffix stripped.
+        ("/solutions/5372961", 'id:"/solutions/5372961/index.html"'),
+        ("/solutions/5372961/index.html", 'id:"/solutions/5372961/index.html"'),
+        ("/articles/67521", 'id:"/articles/67521/index.html"'),
+        # errata: id is the bare advisory ID, view_uri is the path form.
+        ("RHSA-2026:29976", 'id:"RHSA-2026:29976"'),
+        ("/errata/RHSA-2026:29976/", 'view_uri:"/errata/RHSA-2026:29976/"'),
+        # CVE: both forms are indexed.
+        ("/security/cve/CVE-2024-1086/", 'view_uri:"/security/cve/CVE-2024-1086/"'),
+        ("/security/cve/CVE-2024-1086/index.html", 'id:"/security/cve/CVE-2024-1086/index.html"'),
+    ],
+)
+def test_doc_id_filter_covers_corpus_conventions(doc_id, expected_clause):
+    """Every doc_id form a caller can hold resolves to a matching clause."""
+    assert expected_clause in _doc_id_filter(doc_id)
+
+
+def test_doc_id_filter_escapes_quotes():
+    """Injection attempts stay inside the quoted phrase."""
+    assert '\\"' in _doc_id_filter('/solutions/1" OR id:*')
+
+
+async def test_fetch_document_raw_pins_lucene_parser():
+    """The raw lookup must not inherit the request handler's edismax default.
+
+    Under edismax the field-qualified OR is scored as optional clauses
+    governed by the handler's mm, which matches zero documents.
+    """
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.get.return_value = Mock(
+        json=Mock(return_value={"response": {"numFound": 0, "docs": []}}),
+        raise_for_status=Mock(),
+    )
+
+    await _fetch_document_raw("/solutions/5372961", client=mock_client, solr_endpoint=_SOLR_ENDPOINT)
+
+    params = mock_client.get.call_args.kwargs["params"]
+    assert params["defType"] == "lucene"
+    assert params["q"] == _doc_id_filter("/solutions/5372961")
+
+
+async def test_fetch_document_with_query_keeps_caller_query_out_of_q():
+    """Identity goes in q; the caller's query only picks highlights.
+
+    With the query in q, edismax mm decides whether the document comes back
+    at all, so a valid doc_id whose text shares too few terms with the query
+    is reported as "Document not found".
+    """
+    with patch("okp_mcp.tools.document._solr_query", new_callable=AsyncMock) as mock_query:
+        mock_query.return_value = SolrResponse()
+        await _fetch_document_with_query(
+            "/solutions/5372961",
+            "some unrelated question",
+            client=AsyncMock(spec=httpx.AsyncClient),
+            solr_endpoint=_SOLR_ENDPOINT,
+        )
+
+    params = mock_query.call_args.args[0]
+    assert params["q"] == _doc_id_filter("/solutions/5372961")
+    assert params["defType"] == "lucene"
+    assert params["hl.q"] == _clean_query("some unrelated question")
+    assert "fq" not in params

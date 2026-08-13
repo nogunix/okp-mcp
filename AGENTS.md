@@ -70,9 +70,12 @@ Test scenarios live in `tests/functional_cases.py` as `FunctionalCase` dataclass
 
 Functional tests are **deselected by default** via `pytest_collection_modifyitems` in `tests/conftest.py`. They only run when explicitly requested with `-m functional`. They require a running OKP Solr container (`podman-compose up -d`); tests skip automatically if Solr is unreachable.
 
+A second functional module, `tests/test_functional_document.py`, exercises the `get_document` retrieval layer against live Solr. It seeds a real document via `_run_portal_search()`, then calls `_fetch_document_with_query()` / `_fetch_document_raw()` to prove the doc_id drives retrieval while the caller's query only selects highlights (it does not gate retrieval), and that a visible document URL round-trips through `_normalize_doc_id()` before the fetch layer.
+
 **Key files**:
 - `tests/functional_cases.py`: `FunctionalCase` dataclass + parametrized RSPEED test data
 - `tests/test_functional.py`: test runner calling `_run_portal_search()` with structured assertions
+- `tests/test_functional_document.py`: `get_document` retrieval tests (query-does-not-gate, highlight selection, URL normalization round-trip)
 
 ## Project Layout
 
@@ -102,6 +105,7 @@ tests/
   conftest.py          # shared fixtures (solr mocks, sample responses) + functional marker deselection
   functional_cases.py  # FunctionalCase dataclass + parametrized RSPEED test data
   test_functional.py   # functional test runner: calls _run_portal_search() against live Solr, asserts on PortalChunk results
+  test_functional_document.py  # functional get_document tests: query does not gate retrieval, highlight selection, URL normalization round-trip
   test_portal.py       # portal.py unit tests: query builders, chunk conversion, RRF, formatting, single/multi-query orchestrators
   test_*.py            # unit test modules mirror src structure
 .pre-commit-config.yaml  # pre-commit hook definitions (ruff, gitleaks, whitespace, YAML/TOML checks)
@@ -151,6 +155,7 @@ SECURITY.md            # Vulnerability reporting via GitHub Security Advisories
 | Add/modify intent detection | `src/okp_mcp/intent.py` | Append `IntentRule` to `INTENT_RULES` at the correct priority position |
 | Change portal search logic | `src/okp_mcp/portal.py` | Query builders, chunk conversion, RRF fusion, single/multi-query orchestrators, formatting |
 | Change Solr query logic | `src/okp_mcp/solr.py` | `_solr_query()` builds edismax params; `_clean_query()` for tokenization |
+| Change document retrieval query | `src/okp_mcp/tools/document.py` | `_fetch_document_with_query()` selects the doc via `q` under `defType=lucene` and passes the caller's query as `hl.q` (highlights only) so `mm` never gates retrieval; `_doc_id_filter()` normalizes ID suffix forms |
 | Modify result formatting | `src/okp_mcp/formatting.py` | `annotate_result()` for deprecation/EOL (used by portal.py) |
 | Change content cleaning | `src/okp_mcp/content.py` | `strip_boilerplate()` regex, `truncate_content()` |
 | Modify config/CLI args | `src/okp_mcp/config.py` | Add field to `ServerConfig`; auto-generates CLI arg and `MCP_`-prefixed env var |

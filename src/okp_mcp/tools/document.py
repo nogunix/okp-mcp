@@ -65,12 +65,22 @@ def _escape_solr_phrase(value: str) -> str:
 def _doc_id_filter(doc_id: str) -> str:
     """Build a Solr filter that matches a document by ``id`` or ``view_uri``.
 
-    Solr ``id`` may carry an ``/index.html`` suffix that ``view_uri`` omits,
-    so checking both fields ensures a match regardless of which form the
-    caller provides. The value is escaped to prevent Lucene query injection.
+    Both fields are checked in both suffix forms, because the corpus uses
+    three different conventions and callers legitimately supply any of them:
+
+    - solutions/articles/documentation carry ``id`` with an ``/index.html``
+      suffix and no ``view_uri`` at all, yet search_portal renders their URL
+      with the suffix stripped -- so the visible URL round-trips only if the
+      suffix is restored here.
+    - errata carry ``id`` as the bare advisory ID (``RHSA-2026:29976``) and
+      ``view_uri`` as ``/errata/RHSA-2026:29976/``; appending ``/index.html``
+      to an erratum matches neither field.
+    - CVEs carry both forms.
+
+    The value is escaped to prevent Lucene query injection.
     """
-    safe = _escape_solr_phrase(doc_id)
-    return f'id:"{safe}" OR view_uri:"{safe}"'
+    safe = _escape_solr_phrase(doc_id.removesuffix("/index.html").removesuffix("/"))
+    return f'id:"{safe}" OR id:"{safe}/index.html" OR view_uri:"{safe}" OR view_uri:"{safe}/"'
 
 
 def _uses_document_passages(doc: SolrDoc) -> bool:
@@ -181,15 +191,31 @@ async def _fetch_document_with_query(
     *,
     solr_endpoint: str,
 ) -> SolrResponse:
-    """Fetch a document by ID using edismax query mode with highlighting.
+    """Fetch a document by ID, using the caller's query only to pick highlights.
 
-    Uses _solr_query so edismax and highlight parameters are applied.
-    Returns the raw Solr response dict.
+    Identity and relevance are kept in separate parameters on purpose. The
+    document is selected by ``q`` under the lucene parser, and the caller's
+    query is passed as ``hl.q`` so it chooses which passages come back
+    without deciding whether the document is returned at all.
+
+    Putting the caller's query in ``q`` instead would subject retrieval to
+    the edismax ``mm`` in _SOLR_BASE_PARAMS: a perfectly valid doc_id whose
+    document happens to share too few terms with the query would match zero
+    rows and be reported as "Document not found". Returns the Solr response.
     """
+    # defType=lucene overrides the edismax default from _SOLR_BASE_PARAMS. The
+    # base edismax boost params (qf/pf/mm/ps) still ride along in the merged
+    # request and appear in the SOLR query log, but Solr silently ignores them
+    # under the lucene parser -- they are inert here, not a bug. They are left
+    # in place rather than filtered out because _solr_query is shared with
+    # search_portal, which needs them; stripping them would risk that path for a
+    # purely cosmetic log cleanup.
     return await _solr_query(
         {
-            "q": _clean_query(query),
-            "fq": _doc_id_filter(doc_id),
+            "q": _doc_id_filter(doc_id),
+            "defType": "lucene",
+            "hl.q": _clean_query(query),
+            "hl.qparser": "edismax",
             "fl": DOCUMENT_FL,
             "rows": 1,
             "hl.snippets": "10",
@@ -207,7 +233,12 @@ async def _fetch_document_raw(
 
     Uses httpx directly rather than _solr_query to avoid injecting edismax
     and highlight parameters that are not appropriate for raw document retrieval.
-    Returns the raw Solr response dict.
+
+    ``defType`` is pinned to lucene because bypassing _solr_query does not
+    bypass the Solr request handler's own defaults, which select edismax.
+    Under edismax the field-qualified OR in _doc_id_filter is treated as a
+    set of optional clauses governed by the handler's ``mm``, so every
+    lookup matched zero documents. Returns the Solr response.
     """
     close_client = client is None
     if client is None:
@@ -217,6 +248,7 @@ async def _fetch_document_raw(
             solr_endpoint,
             params={
                 "q": _doc_id_filter(doc_id),
+                "defType": "lucene",
                 "wt": "json",
                 "fl": DOCUMENT_FL,
                 "rows": 1,
