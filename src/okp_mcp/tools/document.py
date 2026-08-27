@@ -3,6 +3,7 @@
 import logging
 import time
 
+from collections.abc import Sequence
 from urllib.parse import urlsplit
 
 import httpx
@@ -11,6 +12,7 @@ from fastmcp import Context
 
 from okp_mcp.content import _select_within_budget
 from okp_mcp.content import doc_uri
+from okp_mcp.content import format_sections
 from okp_mcp.content import strip_boilerplate
 from okp_mcp.content import truncate_content
 from okp_mcp.metrics import DOCUMENT_HIGHLIGHT_FALLBACK
@@ -19,6 +21,7 @@ from okp_mcp.metrics import DOCUMENT_NOT_FOUND
 from okp_mcp.metrics import DOCUMENT_NUDGE
 from okp_mcp.metrics import TOOL_CALLS
 from okp_mcp.metrics import TOOL_DURATION
+from okp_mcp.outline import Section
 from okp_mcp.server import get_app_context
 from okp_mcp.server import mcp
 from okp_mcp.solr import _clean_query
@@ -121,7 +124,13 @@ def _format_document_passages(highlight_snippets: list[str], query: str, max_cha
 
 
 def _format_document_content(
-    doc: SolrDoc, data: SolrResponse, doc_id: str, query: str, max_chars: int, current_result: str
+    doc: SolrDoc,
+    data: SolrResponse,
+    doc_id: str,
+    query: str,
+    max_chars: int,
+    current_result: str,
+    sections: Sequence[Section] = (),
 ) -> str:
     """Build the content section for a fetched document.
 
@@ -137,7 +146,7 @@ def _format_document_content(
         YES
          |
         query provided?
-         +--NO--> metadata + "pass a query" nudge (~500 chars)
+         +--NO--> metadata + section outline + "pass a query" nudge
          |
         YES
          |
@@ -148,10 +157,14 @@ def _format_document_content(
     is_documentation = _uses_document_passages(doc)
 
     # Documentation without a query is almost always useless (first 1500 chars
-    # is typically a table of contents). Nudge the caller to be specific.
+    # is typically a table of contents). Nudge the caller to be specific, and
+    # list the sections so the nudge is actionable: the caller can pick the
+    # section it wants, link straight to it, and phrase the follow-up query
+    # from the real title rather than guessing at what the guide covers.
     if is_documentation and not query:
         DOCUMENT_NUDGE.inc()
-        return (
+        outline = format_sections(doc, sections, url=f"https://access.redhat.com{doc_uri(doc)}")
+        return outline + (
             "\n\nThis is a large documentation page. "
             "Pass a query to get_document to extract the most relevant passages."
         )
@@ -261,7 +274,14 @@ async def _fetch_document_raw(
             await client.aclose()
 
 
-async def _format_document(doc: SolrDoc, data: SolrResponse, doc_id: str, query: str, max_chars: int) -> str:
+async def _format_document(
+    doc: SolrDoc,
+    data: SolrResponse,
+    doc_id: str,
+    query: str,
+    max_chars: int,
+    sections: Sequence[Section] = (),
+) -> str:
     """Format a fetched document into a readable string.
 
     Renders title, type, product/version, URL, synopsis/summary/CVE details,
@@ -269,7 +289,7 @@ async def _format_document(doc: SolrDoc, data: SolrResponse, doc_id: str, query:
     Truncates final output to max_chars as a safety net.
     """
     result = _format_metadata(doc)
-    result += _format_document_content(doc, data, doc_id, query, max_chars, result)
+    result += _format_document_content(doc, data, doc_id, query, max_chars, result, sections)
     return truncate_content(result, max_chars)
 
 
@@ -299,7 +319,14 @@ async def get_document(ctx: Context, doc_id: str, query: str = "") -> str:
             DOCUMENT_NOT_FOUND.inc()
             return f"Document not found: {doc_id}"
 
-        return await _format_document(docs[0], data, doc_id, query, app.max_response_chars)
+        doc = docs[0]
+        # Only the outline path renders anchors, and it is the only path that
+        # justifies the mirror's ~200KB fetch, so gate the lookup on it.
+        sections: Sequence[Section] = ()
+        if _uses_document_passages(doc) and not query and app.outline_fetcher is not None:
+            sections = await app.outline_fetcher.get(doc.id or doc_id)
+
+        return await _format_document(doc, data, doc_id, query, app.max_response_chars, sections)
     except httpx.TimeoutException:
         logger.warning("get_document timed out for doc_id=%r", doc_id, exc_info=True)
         return f"Unable to fetch document {doc_id} because the request timed out. Please try again."
