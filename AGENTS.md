@@ -148,9 +148,10 @@ SECURITY.md            # Vulnerability reporting via GitHub Security Advisories
 
 ## Section Anchors (get_document outlines)
 
-`get_document` called on a documentation page without a query returns the page's section
-outline instead of content. Each entry carries the real URL fragment, so callers can link
-straight to a section rather than to the whole guide.
+`get_document` puts real URL fragments on both documentation paths: without a query it
+returns the page's section outline instead of content, and with a query it labels each
+returned passage with the section it came from. Either way the caller can link straight to
+a section rather than to the whole guide.
 
 The anchors cannot come from Solr. Red Hat assigns them in the AsciiDoc source -- "Kafka
 tuning overview" is published at `#con-config-tuning-intro-str` -- and no indexed field
@@ -173,6 +174,26 @@ matched the public docs.redhat.com fragments 45 of 45.
   avoided because it is heavily contended -- pointing the mirror at an unrelated local
   service yields an outline with no anchors rather than wrong ones, but it is still a
   wasted request per lookup.
+- Passages are placed by locating their text in the mirror's body via
+  `DocumentOutline.locate()`. Solr's `main_content` cannot be used for this: it leads with
+  the page's table of contents, which repeats most headings, so offsets computed against it
+  attribute passages to whichever heading the ToC listed. Measured over 146 highlight
+  passages from 33 guides: all 104 drawn from real prose were placed correctly and the 42
+  misses were every one a ToC fragment -- so `locate()` returning None means "not body
+  text", and those passages keep a bare `Passage N:` label rather than borrowing a
+  neighbour's anchor. (That also makes an unplaceable passage a reliable ToC detector, if
+  filtering them out is ever wanted.)
+- Passages that `locate()` cannot place are dropped as ToC noise, but only when prose
+  remains: an unavailable mirror makes everything look unplaceable, and a reference manual
+  can legitimately highlight nothing but heading runs. Measured over 39 guide+query pairs,
+  9 (23%) shed a ToC passage for -17% passage characters; 13 returned nothing but ToC and
+  were left alone. Filtering is a subset in Solr's own order, so relevance cannot regress.
+- Do NOT raise `hl.snippets` to compensate for the dropped passages. It was tried:
+  `hl.snippets` re-fragments the field rather than extending the list, and going from 10 to
+  24 pushed the three relevant admission passages out of the top three in favour of the
+  glossary. Aggregate passage and character counts improved while the answer got worse.
+- Anchoring covers Solr highlight passages. The BM25 fallback path
+  (`_extract_relevant_section`) is not anchored yet.
 - Outlines are trimmed to `_MAX_OUTLINE_CHARS` (15K) by dropping the deepest nesting
   levels, not by truncating the list. Mirror outlines run to a median of 22 sections but
   a p90 of 181 and a max of 460 (~37KB), and the sections a reader wants are as often in
@@ -196,7 +217,7 @@ matched the public docs.redhat.com fragments 45 of 45.
 | Modify result formatting | `src/okp_mcp/formatting.py` | `annotate_result()` for deprecation/EOL (used by portal.py) |
 | Change content cleaning | `src/okp_mcp/content.py` | `strip_boilerplate()` regex, `truncate_content()` |
 | Change the section outline | `src/okp_mcp/content.py` | `format_sections()` renders anchors from `outline.py` when present, else falls back to `heading_h1`/`heading_h2` titles. `_fit_to_budget()` trims to `_MAX_OUTLINE_CHARS` by shedding the deepest nesting levels first, never by cutting the tail; `clean_heading()` normalizes the NBSP numbering separators |
-| Change section anchor lookup | `src/okp_mcp/outline.py` | `parse_outline()` extracts `<section id>` pairs with stdlib `html.parser`; `OutlineFetcher` fetches and LRU-caches them from the HTML mirror. Every failure degrades to an empty list — never raise |
+| Change section anchor lookup | `src/okp_mcp/outline.py` | `parse_document()` extracts `<section id>` sections plus locatable body text with stdlib `html.parser`; `DocumentOutline.locate()` maps a passage to its section; `OutlineFetcher` fetches and LRU-caches parses from the HTML mirror. Every failure degrades to `NO_OUTLINE` — never raise |
 | Modify config/CLI args | `src/okp_mcp/config.py` | Add field to `ServerConfig`; auto-generates CLI arg and `MCP_`-prefixed env var |
 | Enable stateless mode | `src/okp_mcp/config.py` | Enabled by default. `--stateless-http false` or `MCP_STATELESS_HTTP=false` to disable |
 | Add functional test case | `tests/functional_cases.py` | Add `FunctionalCase` to `FUNCTIONAL_TEST_CASES` list |
