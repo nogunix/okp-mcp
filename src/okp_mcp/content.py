@@ -241,7 +241,7 @@ def format_sections(
     the document has no headings at all (solutions, errata, CVEs).
     """
     if sections:
-        entries = [(s.level, f"#{s.anchor} — {s.title}") for s in sections]
+        entries = [(section.level, f"#{section.anchor} — {section.title}") for section in sections]
         return _format_outline(entries, url, linkable=True, max_chars=max_chars)
 
     seen: set[str] = set()
