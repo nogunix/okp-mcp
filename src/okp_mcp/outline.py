@@ -1,5 +1,11 @@
 """Section anchors read from the OKP appliance's HTML mirror.
 
+This is an interim compatibility path: until OKP exposes section-anchor
+metadata through the indexed/document retrieval path, okp-mcp reads the
+rendered HTML mirror to recover the real anchors used by docs.redhat.com.
+Once upstream anchor metadata is available here, this HTML lookup should be
+removed.
+
 Solr indexes documentation as plain text: ``heading_h1``/``heading_h2`` carry
 the section titles but nothing carries the URL fragment each section lives at,
 and the fragments cannot be derived from the titles.  Red Hat assigns them in
