@@ -150,9 +150,15 @@ async def test_fetcher_does_not_log_the_mirror_url(caplog):
     with caplog.at_level("DEBUG", logger="okp_mcp.outline"):
         await fetcher.get("/documentation/en-us/guide/index.html")
 
-    assert caplog.messages
-    assert not any("secret" in message or "okp-internal" in message for message in caplog.messages)
-    assert any("/documentation/en-us/guide/index.html" in message for message in caplog.messages)
+    # Only this module's own records: httpx logs the request URL on its own
+    # logger, which _configure_logging silences at startup. Asserting over
+    # every captured record instead would make the test pass or fail on
+    # whether an earlier test had called that, which is test order.
+    messages = [record.getMessage() for record in caplog.records if record.name == "okp_mcp.outline"]
+
+    assert messages
+    assert not any("secret" in message or "okp-internal" in message for message in messages)
+    assert any("/documentation/en-us/guide/index.html" in message for message in messages)
 
 
 async def test_fetcher_logs_the_status_of_a_failed_fetch(caplog):
