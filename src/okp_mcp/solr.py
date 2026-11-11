@@ -4,6 +4,7 @@ import re
 import time
 
 from enum import StrEnum
+from html import unescape
 
 import httpx
 
@@ -262,6 +263,12 @@ def _get_highlight_snippets(data: SolrResponse, *keys: str, query: str = "") -> 
             snippets = hl[key].get("main_content", [])
             for snippet in snippets:
                 clean = re.sub(r"<[^>]+>", "", snippet)
+                # Decode after the tag strip, not before: Solr's own <em>
+                # markers are real tags, while a "<" decoded from &lt; is
+                # document text (e.g. "nmcli>") and must survive. Left
+                # encoded, commands come back as "192.0.2.1&#x2F;24" and
+                # break when a reader pastes them. portal.py does the same.
+                clean = unescape(clean)
                 clean = re.sub(r"\s+", " ", clean).strip()
                 clean = _filter_rhv_sentences(clean, query) if query else clean
                 if not clean or clean in seen:

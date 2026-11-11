@@ -117,6 +117,36 @@ def test_get_highlight_snippets_preserves_individual_fragments():
     assert snippets == ["First kernel snippet.", "Second snippet about panic."]
 
 
+def test_get_highlight_snippets_decodes_html_entities():
+    """Entities in highlights are decoded so commands come back pasteable."""
+    data = SolrResponse(
+        highlighting={
+            "doc-1": {
+                "main_content": [
+                    "# nmcli connection modify LAN ipv4.addresses &#x27;192.0.2.1&#x2F;24&#x27;",
+                    "nmcli&gt; set <em>ipv4</em>.method manual &amp;&amp; save",
+                ]
+            }
+        }
+    )
+
+    snippets = _get_highlight_snippets(data, "doc-1", query="ipv4")
+
+    assert snippets == [
+        "# nmcli connection modify LAN ipv4.addresses '192.0.2.1/24'",
+        "nmcli> set ipv4.method manual && save",
+    ]
+
+
+def test_get_highlight_snippets_keeps_decoded_angle_brackets():
+    """A decoded &lt;...&gt; is document text, not markup, and is not stripped."""
+    data = SolrResponse(highlighting={"doc-1": {"main_content": ["Run <em>nmcli</em> con up &lt;profile&gt;."]}})
+
+    snippets = _get_highlight_snippets(data, "doc-1", query="nmcli")
+
+    assert snippets == ["Run nmcli con up <profile>."]
+
+
 def test_get_highlight_snippets_deduplicates_across_alias_keys():
     """_get_highlight_snippets deduplicates repeated fragments returned under multiple keys."""
     data = SolrResponse(
